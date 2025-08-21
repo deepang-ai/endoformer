@@ -1,0 +1,10 @@
+accelerate==0.18.0
+monai==1.2.0
+opencv-python==4.8.1.78
+timm==0.9.7
+objprint==0.2.3
+yacs
+einops
+torch
+mmengine
+albumentations
