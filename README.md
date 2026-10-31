@@ -315,9 +315,12 @@ If you find this repository useful, please cite:
   author={Long, Yucheng and Wang, Qiong and Zhang, Mingdu and Huang, Teng and Hu, Ying and Chen, Hao and Zhang, Wensheng and Pang, Yan},
   journal={IEEE Journal of Biomedical and Health Informatics},
   title={EndoFormer: A Hybrid Transformer-Based Approach for Enhanced Polyp Segmentation in Endoscopic Imaging},
-  year={2026}
+  year={2026},
+  doi={10.1109/JBHI.2026.3749866}
 }
 ```
+
+Yucheng Long and Qiong Wang contributed equally to this work.
 
 ## 📄 License
 
