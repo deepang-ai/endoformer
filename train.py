@@ -1,251 +1,188 @@
+"""Train EndoFormer on an endoscopic polyp segmentation dataset."""
+
+from __future__ import annotations
+
+import argparse
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-import sys
 from datetime import datetime
-from typing import Dict
+from pathlib import Path
 
 import monai
-import pytz
 import torch
 import yaml
 from accelerate import Accelerator
-from easydict import EasyDict
 from monai.utils import ensure_tuple_rep
 from objprint import objstr
 from timm.optim import optim_factory
 
 from src import utils
-from src.models import give_model
+from src.config import Overrides, checkpoint_dir, load_config
+from src.data import build_dataloaders
+from src.engine import class_names_for, evaluate, train_epoch
+from src.metrics import create_segmentation_metrics
+from src.model import build_model
 from src.optimizer import LinearWarmupCosineAnnealingLR
-from src.utils import Logger, load_pretrain_model
-import warnings
-warnings.filterwarnings('ignore')
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=str, default='config.yml',
+                        help='Path to the experiment config')
+    parser.add_argument('--gpu', type=str, default=None,
+                        help='GPU device ids to expose, e.g. "0" or "0,1"')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed for initialisation, data order, workers and augmentation')
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='Override run.dataset')
+    parser.add_argument('--data-root', type=str, default=None,
+                        help='Override data.root')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Override run.epochs')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Override run.lr')
+    parser.add_argument('--optimizer', type=str, default=None,
+                        choices=['adamw', 'adam', 'sgd'],
+                        help='Override run.optimizer')
+    parser.add_argument('--checkpoint-name', type=str, default=None,
+                        help='Override run.checkpoint')
+    parser.add_argument('--pretrained', type=str, default=None,
+                        help='Initialise the model from a saved weights file')
+    parser.add_argument('--backbone-pretrained', type=str, default=None,
+                        help='Override model.pretrained (PVTv2-B2 weights)')
+    parser.add_argument('--no-resume', action='store_true', default=False,
+                        help='Start fresh even when run.resume is enabled')
+    return parser.parse_known_args()[0]
 
-def train_one_epoch(model: torch.nn.Module, loss_functions: Dict[str, torch.nn.modules.loss._Loss],
-                    train_loader: torch.utils.data.DataLoader,
-                    optimizer: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler._LRScheduler,
-                    metrics: Dict[str, monai.metrics.CumulativeIterationMetric],
-                    post_trans: monai.transforms.Compose, accelerator: Accelerator, epoch: int, step: int):
-    # 训练
-    model.train()
-    for i, image_batch in enumerate(train_loader):
-        logits = model(image_batch[0])
-        total_loss = 0
-        log = ''
-        for name in loss_functions:
-            alpth = 1
-            loss = loss_functions[name](logits, image_batch[1])
-            accelerator.log({'Train/' + name: float(loss)}, step=step)
-            total_loss += alpth * loss
-        val_outputs = post_trans(logits)
-        for metric_name in metrics:
-            metrics[metric_name](y_pred=val_outputs, y=image_batch[1])
 
-        
-        
-        accelerator.backward(total_loss)
-        optimizer.step()
-        optimizer.zero_grad()
+def main() -> int:
+    args = parse_args()
 
-        for name, param in model.named_parameters():
-            if param.grad is None:
-                print(name)
-        
-        accelerator.log({
-            'Train/Total Loss': float(total_loss),
-        }, step=step)
+    overrides = Overrides(
+        dataset=args.dataset, data_root=args.data_root, epochs=args.epochs,
+        lr=args.lr, optimizer=args.optimizer, seed=args.seed,
+        checkpoint=args.checkpoint_name, pretrained=args.backbone_pretrained,
+        resume=False if args.no_resume else None)
+    config = load_config(args.config, overrides)
+    if args.seed is None:
+        config.run.seed = 50
+    if args.checkpoint_name is None:
+        config.run.checkpoint = str(config.run.checkpoint).replace(
+            '{seed}', str(config.run.seed))
+
+    utils.same_seeds(config.run.seed)
+
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    logging_dir = f"{os.getcwd()}/logs/{config.run.checkpoint}{datetime.now()}"
+    accelerator = Accelerator(cpu=False, log_with=["tensorboard"],
+                              project_dir=logging_dir)
+    utils.Logger(logging_dir if accelerator.is_local_main_process else None)
+    accelerator.init_trackers(Path(__file__).stem)
+    _archive_config(args.config, config, logging_dir, accelerator)
+    accelerator.print(objstr(config))
+
+    accelerator.print('Load data...')
+    train_loader, val_loader, spec = build_dataloaders(config, config.run.seed)
+
+    accelerator.print('Build model...')
+    model = build_model(config, spec.num_classes)
+    total_parameters = sum(p.numel() for p in model.parameters())
+    trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    accelerator.print(
+        f"Backbone: PVTv2-{model.backbone_variant} "
+        f"depths={list(model.backbone.depths)} "
+        f"parameters={sum(p.numel() for p in model.backbone.parameters()) / 1e6:.2f}M")
+    accelerator.print(f"Trainable/total parameters: {trainable_parameters}/{total_parameters}")
+    accelerator.print(f"Output classes: {spec.num_classes} ({spec.name})")
+
+    inference = monai.inferers.SlidingWindowInferer(
+        roi_size=ensure_tuple_rep(config.data.image_size, 2), overlap=0.5,
+        sw_device=accelerator.device, device=accelerator.device)
+    train_metrics = create_segmentation_metrics(spec.score_background)
+    val_metrics = create_segmentation_metrics(spec.score_background)
+    post_trans = monai.transforms.Compose([
+        monai.transforms.Activations(sigmoid=True),
+        monai.transforms.AsDiscrete(threshold=0.5),
+    ])
+
+    optimizer = optim_factory.create_optimizer_v2(
+        model, opt=config.run.optimizer,
+        weight_decay=config.run.weight_decay,
+        lr=config.run.lr, betas=(0.9, 0.95))
+    scheduler = LinearWarmupCosineAnnealingLR(
+        optimizer, warmup_epochs=config.run.warmup,
+        max_epochs=config.run.epochs)
+    loss_functions = {
+        'focal_loss': monai.losses.FocalLoss(to_onehot_y=False),
+        'dice_loss': monai.losses.DiceLoss(smooth_nr=0, smooth_dr=1e-5,
+                                          to_onehot_y=False, sigmoid=True),
+    }
+
+    if args.pretrained:
+        model = utils.load_pretrain_model(args.pretrained, model, accelerator)
+
+    starting_epoch, step, best_acc, best_class, best_epoch = 0, 0, torch.tensor(0), [], -1
+    if config.run.resume:
+        state = utils.resume_train_state(model, config.run.checkpoint,
+                                         optimizer, scheduler, train_loader, accelerator)
+        starting_epoch, step = state.start_epoch, state.step
+        best_acc, best_class = state.best_acc, state.best_class
+
+    joint = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader)
+    model, optimizer, scheduler, train_loader, val_loader = joint
+    best_acc = best_acc.to(accelerator.device)
+
+    accelerator.print('Start training!')
+    for epoch in range(starting_epoch, config.run.epochs):
+        step = train_epoch(model, loss_functions, train_loader, optimizer, scheduler,
+                           train_metrics, post_trans, accelerator, epoch, step,
+                           config.run.epochs)
+        mean_dice, results, step = evaluate(
+            model, loss_functions, val_loader, inference, val_metrics, post_trans,
+            accelerator, epoch, step, config.run.epochs,
+            score_background=spec.score_background,
+            class_names=class_names_for(spec))
+
+        if mean_dice > best_acc:
+            best_acc, best_class, best_epoch = mean_dice, results, epoch
+            accelerator.save_state(output_dir=str(checkpoint_dir(config, 'best')))
+
+        accelerator.save_state(output_dir=str(checkpoint_dir(config, 'checkpoint')))
+        torch.save({'epoch': epoch, 'best_acc': best_acc, 'best_class': results},
+                   checkpoint_dir(config, 'checkpoint') / 'epoch.pth.tar')
         accelerator.print(
-            f'Epoch [{epoch + 1}/{config.trainer.num_epochs}] Training [{i + 1}/{len(train_loader)}] Loss: {total_loss:1.5f} {log}',
-            flush=True)
-        step += 1
-        # break
-    scheduler.step(epoch)
-    metric = {}
-    for metric_name in metrics:
-        batch_acc = metrics[metric_name].aggregate()[0].to(accelerator.device)
-        if accelerator.num_processes > 1:
-            batch_acc = accelerator.reduce(batch_acc) / accelerator.num_processes
-        metric.update({
-        f'Train/mean {metric_name}': float(batch_acc.mean())})
-        
-    accelerator.print(f'Epoch [{epoch + 1}/{config.trainer.num_epochs}] Training metric {metric}')
-    accelerator.log(metric, step=epoch)
-    return step
+            f"Epoch [{epoch + 1}/{config.run.epochs}] best Dice: {best_acc} "
+            f"current Dice: {mean_dice}")
+
+    accelerator.print(f"Best Dice: {best_acc}")
+    accelerator.print(f"Best epoch: {best_epoch}")
+    return 0
 
 
-@torch.no_grad()
-def val_one_epoch(model: torch.nn.Module, loss_functions: Dict[str, torch.nn.modules.loss._Loss],
-                  inference: monai.inferers.Inferer, val_loader: torch.utils.data.DataLoader,
-                  config: EasyDict, metrics: Dict[str, monai.metrics.CumulativeIterationMetric], step: int,
-                  post_trans: monai.transforms.Compose, accelerator: Accelerator, epoch: int):
-    # 验证
-    model.eval()
-    for i, image_batch in enumerate(val_loader):
-        logits = inference(image_batch[0], model)
-        total_loss = 0
-        log = ''
-        for name in loss_functions:
-            loss = loss_functions[name](logits, image_batch[1])
-            accelerator.log({'Val/' + name: float(loss)}, step=step)
-            log += f' {name} {float(loss):1.5f} '
-            total_loss += loss
-        val_outputs = post_trans(logits)
-        for metric_name in metrics:
-            metrics[metric_name](y_pred=val_outputs, y=image_batch[1])
-        accelerator.log({
-            'Val/Total Loss': float(total_loss),
-        }, step=step)
-        accelerator.print(
-            f'Epoch [{epoch + 1}/{config.trainer.num_epochs}] Validation [{i + 1}/{len(val_loader)}] Loss: {total_loss:1.5f} {log}',
-            flush=True)
-        step += 1
-    metric = {}
-    if config.trainer.dataset_choose != 'EDD_seg':
-        for metric_name in metrics:
-            batch_acc = metrics[metric_name].aggregate()[0].to(accelerator.device)
-            if accelerator.num_processes > 1:
-                batch_acc = accelerator.reduce(batch_acc) / accelerator.num_processes
-            metrics[metric_name].reset()
-            metric.update({
-            f'Val/mean {metric_name}': float(batch_acc.mean())})
-            
-        accelerator.print(f'Epoch [{epoch + 1}/{config.trainer.num_epochs}] Validation metric {metric}')
-        accelerator.log(metric, step=epoch)
-    else:
-        for metric_name in metrics:
-            batch_acc = metrics[metric_name].aggregate()[0].to(accelerator.device)
-            if accelerator.num_processes > 1:
-                batch_acc = accelerator.reduce(batch_acc) / accelerator.num_processes
-            metrics[metric_name].reset()
-            if batch_acc.size()==torch.Size([]) or batch_acc.size()==torch.Size([1]):
-                metric.update({
-                    f'Val/mean {metric_name}': float(batch_acc.mean()),
-                    })
-            else:
-                metric.update({
-                    f'Val/mean {metric_name}': float(batch_acc.mean()),
-                    f'Val/BE {metric_name}': float(batch_acc[0]),
-                    f'Val/cancer {metric_name}': float(batch_acc[1]),
-                    f'Val/HGD {metric_name}': float(batch_acc[2]),
-                    f'Val/polyp {metric_name}': float(batch_acc[3]),
-                    f'Val/suspicious {metric_name}': float(batch_acc[4])})
-    return torch.Tensor([metric['Val/mean dice_metric']]).to(accelerator.device), metric, step
+def _archive_config(config_path, config, logging_dir, accelerator) -> None:
+    """Keep the config that produced this run next to its log."""
+    if not accelerator.is_local_main_process:
+        return
+    source = Path(config_path).expanduser()
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    if not source.exists():
+        raise FileNotFoundError(f"Config file not found: {source}")
+    target = Path(logging_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    with open(target / 'config.yml', 'w', encoding='utf-8') as handle:
+        yaml.safe_dump(_plain(config), handle, sort_keys=False,
+                       allow_unicode=True)
+
+
+def _plain(node):
+    """Recursively convert EasyDict to plain containers for YAML dumping."""
+    if isinstance(node, dict):
+        return {key: _plain(value) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_plain(item) for item in node]
+    return node
 
 
 if __name__ == '__main__':
-    config = EasyDict(yaml.load(open('config.yml', 'r', encoding="utf-8"), Loader=yaml.FullLoader))
-    utils.same_seeds(50)
-    logging_dir = os.getcwd() + '/logs/' + config.finetune.checkpoint +str(datetime.now())
-    accelerator = Accelerator(cpu=False, log_with=["tensorboard"], logging_dir=logging_dir)
-    Logger(logging_dir if accelerator.is_local_main_process else None)
-    accelerator.init_trackers(os.path.split(__file__)[-1].split(".")[0])
-    accelerator.print(objstr(config))
-
-    accelerator.print('Load Model...')
-    model = give_model(config)
-    
-    image_size = config.dataset.CVC_ClinicDB.image_size
-
-    accelerator.print('Load Dataloader...')
-    if config.trainer.dataset_choose == 'CVC_ClinicDB':
-        from src.CVCLoder import get_dataloader
-        train_loader, val_loader = get_dataloader(config,dataset_choose='CVC_ClinicDB')
-        include_background = False
-    elif config.trainer.dataset_choose == 'Kvasir_SEG':
-        from src.CVCLoder import get_dataloader
-        train_loader, val_loader = get_dataloader(config,dataset_choose='Kvasir_SEG')
-        include_background = False
-    elif config.trainer.dataset_choose == 'EDD_seg':
-        from src.EDDLoader import get_dataloader
-        train_loader, val_loader = get_dataloader(config)
-        include_background = True
-    elif config.trainer.dataset_choose == 'PolypGen':
-        from src.PolpyGenLoder import get_dataloader
-        train_loader, val_loader = get_dataloader(config)
-        include_background = True
-    elif config.trainer.dataset_choose == 'Sun_seg':
-        from src.SunsegLoader import get_dataloader
-        train_loader, val_loader = get_dataloader(config)
-        include_background = True
-
-    inference = monai.inferers.SlidingWindowInferer(roi_size=ensure_tuple_rep(image_size, 2), overlap=0.5,
-                                                    sw_device=accelerator.device, device=accelerator.device)
-    metrics = {
-        'dice_metric': monai.metrics.DiceMetric(include_background=include_background,
-                                                reduction=monai.utils.MetricReduction.MEAN_BATCH, get_not_nans=True),
-        'miou_metric':monai.metrics.MeanIoU(include_background=include_background),
-        'f1': monai.metrics.ConfusionMatrixMetric(include_background=include_background, metric_name='f1 score'),
-        'precision': monai.metrics.ConfusionMatrixMetric(include_background=include_background, metric_name="precision"),
-        'recall': monai.metrics.ConfusionMatrixMetric(include_background=include_background, metric_name="recall"),
-        'hd95_metric': monai.metrics.HausdorffDistanceMetric(percentile=95, include_background=include_background, reduction=monai.utils.MetricReduction.MEAN_BATCH, get_not_nans=True)
-    }
-    post_trans = monai.transforms.Compose([
-        monai.transforms.Activations(sigmoid=True), monai.transforms.AsDiscrete(threshold=0.5)
-    ])
-
-    # 定义训练参数
-    optimizer = optim_factory.create_optimizer_v2(model, opt=config.trainer.optimizer,
-                                                  weight_decay=config.trainer.weight_decay,
-                                                  lr=config.trainer.lr, betas=(0.9, 0.95))
-    scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=config.trainer.warmup,
-                                              max_epochs=config.trainer.num_epochs)
-    loss_functions = {
-        'focal_loss': monai.losses.FocalLoss(to_onehot_y=False),
-        'dice_loss': monai.losses.DiceLoss(smooth_nr=0, smooth_dr=1e-5, to_onehot_y=False, sigmoid=True),
-    }
-
-    step = 0
-    best_eopch = -1
-    val_step = 0
-    starting_epoch = 0
-    best_acc = torch.tensor(0)
-    best_class = []
-    # # 尝试加载预训练模型
-    # model = load_pretrain_model(f"{os.getcwd()}/model_store/{config.finetune.checkpoint}/best/pytorch_model.bin", model,
-    #                             accelerator)
-
-    # 尝试继续训练
-    if config.trainer.resume:
-        model, optimizer, scheduler, starting_epoch, train_step, best_acc, best_class = utils.resume_train_state(model, '{}'.format(
-            config.finetune.checkpoint), optimizer, scheduler, train_loader, accelerator)
-        val_step = train_step
-        
-    model, optimizer, scheduler, train_loader, val_loader = accelerator.prepare(model, optimizer, scheduler,
-                                                                                train_loader, val_loader)
-    best_acc = best_acc.to(accelerator.device)
-
-    # 开始训练
-    accelerator.print("Start Training! ")
-
-    for epoch in range(starting_epoch, config.trainer.num_epochs):
-        # 训练
-        step = train_one_epoch(model, loss_functions, train_loader,
-                               optimizer, scheduler, metrics,
-                               post_trans, accelerator, epoch, step)
-        # 验证
-        mean_acc, batch_acc, val_step = val_one_epoch(model, loss_functions, inference, val_loader,
-                                                      config, metrics, val_step,
-                                                      post_trans, accelerator, epoch)
-
-        # 保存模型
-        if mean_acc > best_acc:
-            accelerator.save_state(output_dir=f"{os.getcwd()}/model_store/{config.finetune.checkpoint}/best")
-            best_acc = mean_acc
-            best_class = batch_acc
-            best_eopch = epoch
-        accelerator.print('Cheakpoint...')
-        accelerator.save_state(output_dir=f"{os.getcwd()}/model_store/{config.finetune.checkpoint}/checkpoint")
-        torch.save({'epoch': epoch, 'best_acc': best_acc, 'best_class': batch_acc},
-                   f'{os.getcwd()}/model_store/{config.finetune.checkpoint}/checkpoint/epoch.pth.tar')
-        
-        
-        accelerator.print(
-            f'Epoch [{epoch + 1}/{config.trainer.num_epochs}] best acc:{best_acc}, Now : mean acc: {mean_acc}, mean class: {batch_acc}')
-
-
-    accelerator.print(f"best acc: {best_acc}")
-    accelerator.print(f"best class : {best_class}")
-    accelerator.print(f"best epochs: {best_eopch}")
-    sys.exit(1)
+    raise SystemExit(main())

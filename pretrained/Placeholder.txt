@@ -1,0 +1,7 @@
+ImageNet-pretrained PVTv2-B2 weights belong in this directory:
+
+    pretrained/pvt_v2_b2.pth
+
+Download (101 MB):
+
+    wget -P pretrained https://github.com/whai362/PVT/releases/download/v2/pvt_v2_b2.pth

@@ -1,256 +1,33 @@
-trainer:
-  num_epochs: 300
+run:
+  dataset: CVC_ClinicDB          # CVC_ClinicDB | Kvasir_SEG | EDD_seg | PolypGen | Sun_seg
+  epochs: 300
   warmup: 2
-  train_ratio: 0.8
   lr: 0.001
-  min_lr: 0.0000001
-  optimizer: adamw
+  optimizer: adamw               # adamw | adam | sgd
   weight_decay: 0.05
-  weight_decay_end: 0.04
-  pred_ratio_var: 0
-  resume: True
-  dataset_choose: CVC_ClinicDB
-  # dataset_choose: Kvasir_SEG
-  # dataset_choose: EDD_seg
-  # dataset_choose: PolypGen
-  # dataset_choose: Sun_seg
+  seed: 50
+  resume: false
+  checkpoint: EndoFormer
 
-dataset:
-  CVC_ClinicDB:
-    data_root: /dataset/cv/seg/CVC-ClinicDB/
-    batch_size: 1
-    num_workers: 4
-    image_size: 352
-    train_ratio: 0.8
-  Kvasir_SEG:
-    data_root: /dataset/cv/seg/Kvasir-SEG/
-    batch_size: 8
-    num_workers: 4
-    image_size: 352
-    train_ratio: 0.8
-  EDD_seg:
-    data_root: /dataset/cv/seg/EDD2020/
-    batch_size: 8
-    num_workers: 4
-    image_size: 352
-    train_ratio: 0.8
-    image_mean: 0.5
-    image_std: 0.5
-  PolypGen:
-    data_root: /liyunhao/Zmd/PolpyGen/
-    batch_size: 8
-    num_workers: 4
-    image_size: 352
-    train_ratio: 0.8
-    image_mean: 0.5
-    image_std: 0.5
-  Sun_seg:
-    data_root: /root/.cache/huggingface/forget/datasets/SUN Colonscopy Video/data/SUN-SEG/
-    batch_size: 8
-    num_workers: 4
-    image_size: 352
-    image_mean: 0.5
-    image_std: 0.5
+data:
+  root: ./datasets/CVC-ClinicDB
+  batch_size: 8
+  num_workers: 4
+  image_size: 352
+  train_ratio: 0.8
+  mean: 0.5
+  std: 0.5
 
-finetune:
-  checkpoint: VANet
-  # model_choose: CVC_UNETR
-  # model_choose: CFANet
-  # model_choose: PVT_CASCADE
-  # model_choose: FCBFormer
-  # model_choose: TransUNet
-  # model_choose: CFPNet
-  # model_choose: UNETR
-  # model_choose: SWINUNETR
-  # model_choose: DuAT
-  # model_choose: UNet
-  # model_choose: FCBFormer
-  # model_choose: UM_Net
-  # model_choose: BMANet
-  model_choose: VANet
-  
+model:
+  pretrained: ./pretrained/pvt_v2_b2.pth
+  dims: [64, 128, 320, 512]
+  out_dim: 32
+  kernel_size: 3
+  mlp_ratio: 4
+  gla_ratio: 4
+  gla_heads: 2
 
 visualization:
-  img_path: "./visualization/img/"
-  mask_path: "./visualization/label/"
-  visualization_path: "./visualization/output/"
-
-
-models:
-  cvc_unetr:
-    branch1:
-      in_channels: 3
-      out_channels: 1
-      dims: [64, 128, 320, 512]
-      out_dim: 32
-      kernel_size: 3
-      mlp_ratio: 4
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth
-    branch5:
-      in_channels: 3
-      out_channels: 5
-      dims: [64, 128, 320, 512]
-      out_dim: 32
-      kernel_size: 3
-      mlp_ratio: 4
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth
-
-  duat:
-    branch1:
-      in_channels: 3
-      out_channels: 1
-      dim: 32
-      dims: [64, 128, 320, 512] 
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth
-    branch5:
-      in_channels: 3
-      out_channels: 5
-      dim: 32
-      dims: [64, 128, 320, 512] 
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth
-
-  FCBFormer:
-    branch1:
-      size: 352
-      num_class: 1
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b3.pth
-    branch5:
-      size: 352
-      num_class: 5
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b3.pth
-
-  unet:
-    branch1:
-      n_channels: 3
-      n_classes: 1
-      bilinear: False
-    branch5:
-      n_channels: 3
-      n_classes: 5
-      bilinear: False
-
-  swin_unetr:
-    branch1:
-      img_size: [352,352]
-      in_channels: 3
-      out_channels: 1
-      use_checkpoint: True
-      spatial_dims: 2
-    branch5:
-      img_size: [352,352]
-      in_channels: 3
-      out_channels: 5
-      use_checkpoint: True
-      spatial_dims: 2
-
-  u_netr:
-    branch1:
-      spatial_dims: 2
-      feature_size: 64
-      img_size: 352
-      in_channels: 3
-      out_channels: 1
-    branch5:
-      spatial_dims: 2
-      feature_size: 64
-      img_size: 352
-      in_channels: 3
-      out_channels: 5
-
-  cfp_net:
-    branch1:
-      classes: 1
-      block_1: 2
-      block_2: 6 
-    branch5:
-      classes: 5
-      block_1: 2
-      block_2: 6 
-    
-  trans_unet:
-    branch1:
-      img_dim: 352
-      in_channels: 3
-      out_channels: 128
-      head_num: 4
-      mlp_dim: 512
-      block_num: 8
-      patch_dim: 16
-      class_num: 1
-    branch5:
-      img_dim: 352
-      in_channels: 3
-      out_channels: 128
-      head_num: 4
-      mlp_dim: 512
-      block_num: 8
-      patch_dim: 16
-      class_num: 5
-
-  cfa_net:
-    branch1:
-      in_class: 3
-      out_class: 1
-      channel: 64
-    branch5:
-      in_class: 3
-      out_class: 5
-      channel: 64 
-  
-  pvt_ca:
-    branch1:
-      n_class: 3
-      o_class: 1
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth
-    branch5:
-      n_class: 3
-      o_class: 5
-      model_dir: /root/.cache/huggingface/forget/pvt_v2_b2.pth 
-  
-  um_net:
-    branch1:
-      num_classes: 1
-    branch5:
-      num_classes: 5
-
-  bmanet:
-    branch1:
-      channel: 64
-      out_channel: 1
-      model_dir: '/root/.cache/huggingface/forget/pvt_v2_b2.pth'
-    branch5:
-      channel: 64
-      out_channel: 5
-      model_dir: '/root/.cache/huggingface/forget/pvt_v2_b2.pth'
-  
-  vanet:
-    branch1:
-      cfg: './src/VANet/experiments/imagenet/cvt/cvt-13-224x224.yaml'
-      embed_dims: [64, 192, 384]
-      depths: [1, 2, 10]
-      mlp_ratios: [4, 4, 4]
-      num_heads: [1, 3, 6]
-      strides: [4, 2, 2]
-      proj_drop: 0.1
-      attn_drop: 0.1
-      drop_path: 0.1
-      num_class: 1
-    branch5:
-      cfg: './src/VANet/experiments/imagenet/cvt/cvt-13-224x224.yaml'
-      embed_dims: [64, 192, 384]
-      depths: [1, 2, 10]
-      mlp_ratios: [4, 4, 4]
-      num_heads: [1, 3, 6]
-      strides: [4, 2, 2]
-      proj_drop: 0.1
-      attn_drop: 0.1
-      drop_path: 0.1
-      num_class: 5
-  
-
-shared path: /root/.cache/huggingface/forget/model_stores/
-
-
-
-
-
+  img_path: ./visualization/img/
+  mask_path: ./visualization/label/
+  output_path: ./visualization/output/

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endoformer"
+version = "1.0.0"
+description = "EndoFormer: a hybrid Transformer for enhanced polyp segmentation in endoscopic imaging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Yucheng Long" },
+    { name = "Qiong Wang" },
+    { name = "Mingdu Zhang" },
+    { name = "Teng Huang" },
+    { name = "Ying Hu" },
+    { name = "Hao Chen" },
+    { name = "Wensheng Zhang" },
+    { name = "Yan Pang" },
+]
+keywords = ["polyp segmentation", "endoscopy", "medical image segmentation", "transformer"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "timm>=0.9.7",
+    "monai>=1.2.0",
+    "accelerate>=0.18.0",
+    "albumentations>=1.3",
+    "opencv-python>=4.8.1.78",
+    "numpy>=1.24,<2",
+    "einops>=0.6",
+    "easydict>=1.13",
+    "objprint>=0.2.3",
+    "PyYAML>=6.0",
+    "pytz",
+]
+
+[project.optional-dependencies]
+# Only needed by visualization.py
+visualize = [
+    "matplotlib>=3.7",
+    "imageio>=2.31",
+    "Pillow>=9.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+# This repository is used as a project, not installed as a library.
+package = false

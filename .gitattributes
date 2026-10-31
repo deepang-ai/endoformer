@@ -1,0 +1,8 @@
+# Normalise line endings so the repository stays LF on every platform
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.pth binary
+*.safetensors binary
