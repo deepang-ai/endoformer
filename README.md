@@ -110,21 +110,26 @@ uv run torchrun --nproc_per_node 2 --master_port 29400 train.py
 uv run torchrun --nproc_per_node 4 --master_port 29400 verify.py
 ```
 
-Or use the provided scripts:
+`train.sh` and `verify.sh` wrap the two commands above. They set `CUDA_VISIBLE_DEVICES`
+to two and four cards respectively; edit those values, or call `torchrun` directly, when
+your machine differs.
 
-```bash
-bash train.sh
-bash verify.sh
-```
+Training settings live in `config.yml` and can be overridden from the command line:
 
-Useful `train.py` flags: `--dataset`, `--epochs`, `--lr`, `--optimizer {adamw,adam,sgd}`,
-`--seed`, `--data-root`, `--pretrained` (initialize from a saved model),
-`--backbone-pretrained`, `--checkpoint-name`, `--no-resume`, `--gpu`, `--config`.
-Every flag maps to a key in `config.yml`, so a run can be described either way.
+| Script | Flags |
+|---|---|
+| `train.py` | `--config`, `--dataset`, `--data-root`, `--epochs`, `--lr`, `--optimizer {adamw,adam,sgd}`, `--seed`, `--gpu`, `--checkpoint-name`, `--backbone-pretrained`, `--pretrained`, `--no-resume` |
+| `verify.py` | `--config`, `--dataset`, `--data-root`, `--checkpoint` |
+| `visualization.py` | `--config`, `--dataset`, `--checkpoint` |
 
-Training keeps the best model under `model_store/<checkpoint>/best/`, where `<checkpoint>` is
-`run.checkpoint` in `config.yml`. `verify.py` evaluates that model by default; pass
-`--checkpoint <path>` to evaluate another one.
+`--backbone-pretrained` overrides `model.pretrained` (the ImageNet checkpoint);
+`--pretrained` initializes the whole model from a saved weights file. `--gpu` sets
+`CUDA_VISIBLE_DEVICES`.
+
+Training keeps the best model under `model_store/<checkpoint>/best/`, where `<checkpoint>`
+is `run.checkpoint` in `config.yml` or `--checkpoint-name`. `verify.py` and
+`visualization.py` read that path by default; pass `--checkpoint <file>` to use any other
+weights file.
 
 ### 5) Visualize
 
@@ -133,9 +138,9 @@ uv run python visualization.py
 ```
 
 Place images to segment under `visualization.img_path` and their ground-truth masks under
-`visualization.mask_path/GT/`. The script uses the best model saved by `train.py`. Predicted
-masks are written to `visualization.mask_path/<dataset>/` and overlays to
-`visualization.output_path/<dataset>/`. All three locations are configurable.
+`visualization.mask_path/GT/`. Predicted masks are written to
+`visualization.mask_path/<dataset>/` and overlays to `visualization.output_path/<dataset>/`.
+All three locations are configurable.
 
 ---
 
