@@ -1,6 +1,6 @@
 # EndoFormer: A Hybrid Transformer-Based Approach for Enhanced Polyp Segmentation in Endoscopic Imaging
 
-> 🎉 This work is published in **IEEE Journal of Biomedical and Health Informatics (JBHI)**.
+> 🎉 This work is published in [IEEE Journal of Biomedical and Health Informatics](https://ieeexplore.ieee.org/document/11770264) (JBHI) 2026.
 
 Official implementation of **EndoFormer**, a hybrid Transformer framework for fully automatic
 polyp segmentation in endoscopic images.
